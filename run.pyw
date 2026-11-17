@@ -38,6 +38,28 @@ _relaunch_windowless()
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
+
+def _wait_previous_instance():
+    """由「重启」菜单拉起时带 --restart-after <pid>：先等上一个实例退出（它要保存配置、释放锁），
+    再照常启动。等待者自身就是重启后的实例，所以这里只是「晚一点开始」。"""
+    args = sys.argv[1:]
+    if len(args) != 2 or args[0] != "--restart-after":
+        return
+    try:
+        pid = int(args[1])
+    except ValueError:
+        return
+    sys.argv = [sys.argv[0]]          # 别把内部参数带进后面的启动流程
+    try:
+        from wisland.relaunch import wait_previous
+        wait_previous(pid)
+    except Exception:
+        import time
+        time.sleep(1.5)               # 极端情况（包没就绪）退化成固定等待
+
+
+_wait_previous_instance()
+
 class _Tee:
     """日志始终写入 data/wisland.log；有控制台时同时输出到控制台。"""
     def __init__(self, *streams):

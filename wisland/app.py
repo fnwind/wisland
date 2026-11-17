@@ -67,6 +67,21 @@ def _G():
     return G
 
 
+def restart_app(app, island=None) -> bool:
+    """重启 wisland：先拉起等待者（它会等本进程退出后再启动），然后走正常的退出流程。
+
+    退出流程不变（shutdown：停服务 → cfg.save() → lock.unlock()），所以重启后配置和页面状态都在。
+    拉起失败时**不退出**，避免「关掉了但起不来」。
+    """
+    from .relaunch import spawn_restart
+    if not spawn_restart():
+        if island is not None:
+            island.activity({"glyph": _G().BELL, "title": "重启失败，请手动重新启动"}, 3.0)
+        return False
+    app.quit()
+    return True
+
+
 def toggle_page(island, ctx, key: str):
     """设置 → 面板：立刻显示 / 隐藏一个页面，并写回 config.json → pages.hidden。"""
     on = not island.page_visible(key)
@@ -412,6 +427,11 @@ def main():
         ctx.weather.refresh()
         island.activity({"glyph": G.CHECK, "title": "配置已重新加载"}, 1.8)
 
+    def restart_now():
+        """菜单里的「重启 wisland」：先给 400ms 反馈，再真正重启（收起态能看到提示）。"""
+        island.activity({"glyph": G.REFRESH, "title": "正在重启…"}, 1.2)
+        QtCore.QTimer.singleShot(400, lambda: restart_app(app, island))
+
     def build_menu(menu: QtWidgets.QMenu):
         menu.addAction("编辑配置 config.json").triggered.connect(lambda: os.startfile(str(CONFIG_PATH)))  # noqa: S606
         menu.addAction("重新加载配置").triggered.connect(reload_cfg)
@@ -437,6 +457,7 @@ def main():
         a.triggered.connect(lambda: set_autostart(not autostart_enabled()))
         menu.addAction("打开数据目录").triggered.connect(lambda: os.startfile(str(DATA_DIR)))  # noqa: S606
         menu.addSeparator()
+        menu.addAction("重启 wisland").triggered.connect(restart_now)
         menu.addAction("退出 wisland").triggered.connect(app.quit)
 
     def show_menu(pos):
