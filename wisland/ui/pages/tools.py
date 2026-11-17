@@ -2,12 +2,14 @@
 """剪贴板历史与日语翻译。"""
 from __future__ import annotations
 
+import re
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...core.config import cfg
 from ..anim import clamp
+from ..glass import exclude_from_capture
 from ..theme import G, W, icon_font, theme, ui_font
 from ..widgets import (Segmented, Card, Hoverable, IconButton, Label, LineEdit, PillButton, ScrollArea, TextEdit, hbox, painter,
                        vbox)
@@ -15,46 +17,218 @@ from .base import Page
 
 Qt = QtCore.Qt
 
+_COLOR_RE = re.compile(r"^(?:#(?P<hex>[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+                       r"|rgba?\((?P<rgb>[^)]{3,40})\))$")
+
+
+def color_of(text: str) -> QtGui.QColor | None:
+    """整串就是一个颜色值时返回它（#9CB9FF / #fff / rgba(…))，否则 None。
+
+    要求整串匹配，避免把长文本里出现的 #fff 误判成色块。
+    """
+    s = (text or "").strip()
+    if not s or len(s) > 46:
+        return None
+    m = _COLOR_RE.match(s)
+    if not m:
+        return None
+    if m.group("hex"):
+        h = m.group("hex")
+        if len(h) in (3, 4):                      # #RGB / #RGBA -> 展开
+            h = "".join(ch * 2 for ch in h)
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        a = int(h[6:8], 16) if len(h) == 8 else 255
+        return QtGui.QColor(r, g, b, a)
+    parts = [p.strip() for p in m.group("rgb").replace("/", ",").split(",")]
+    try:
+        nums = [float(p.rstrip("%")) for p in parts[:4] if p]
+    except ValueError:
+        return None
+    if len(nums) < 3:
+        return None
+    r, g, b = (max(0, min(255, round(n))) for n in nums[:3])
+    a = 255
+    if len(nums) > 3:
+        a = max(0, min(255, round(nums[3] * 255 if nums[3] <= 1 else nums[3])))
+    return QtGui.QColor(r, g, b, a)
+
+
+def abs_time(t: float) -> str:
+    """绝对时间：当天 HH:MM，同年 MM/DD HH:MM，跨年 YYYY/MM/DD HH:MM。"""
+    if not t:
+        return ""
+    lt, nt = time.localtime(t), time.localtime()
+    if (lt.tm_year, lt.tm_yday) == (nt.tm_year, nt.tm_yday):
+        return time.strftime("%H:%M", lt)
+    if lt.tm_year == nt.tm_year:
+        return time.strftime("%m/%d %H:%M", lt)
+    return time.strftime("%Y/%m/%d %H:%M", lt)
+
+
+class ImagePreview(QtWidgets.QWidget):
+    """缩略图悬停预览：最大 400×400，保持原始长宽比，不放大。
+
+    全局只用一个实例；总是出现在灵动岛窗口外侧（贴着那一行的垂直位置），不会盖住面板。
+    """
+    MAX = 400
+    PAD = 5
+    GAP = 20                 # 与面板本体的间距
+    _inst: "ImagePreview | None" = None
+
+    @classmethod
+    def instance(cls) -> "ImagePreview":
+        if cls._inst is None:
+            cls._inst = cls()
+        return cls._inst
+
+    @classmethod
+    def hide_preview(cls):
+        if cls._inst is not None:
+            cls._inst.hide()
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._pm: QtGui.QPixmap | None = None
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        try:                                   # 和灵动岛一起遵守「不参与截图」
+            exclude_from_capture(int(self.winId()), bool(cfg.get("island.exclude_from_capture", False)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def show_for(self, pm: QtGui.QPixmap, panel: QtCore.QRect, y_center: int):
+        """panel 是面板「本体」的全局矩形（不含窗口两侧的透明留白），预览贴着它外侧 20px 弹出。"""
+        if pm is None or pm.isNull():
+            return
+        scale = min(self.MAX / max(1, pm.width()), self.MAX / max(1, pm.height()), 1.0)
+        w = max(1, round(pm.width() * scale))
+        h = max(1, round(pm.height() * scale))
+        self._pm = pm
+        self.resize(w + self.PAD * 2, h + self.PAD * 2)
+        g = (QtGui.QGuiApplication.screenAt(panel.center()) or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
+        x = panel.right() + 1 + self.GAP
+        if x + self.width() > g.right():        # 右侧放不下就放左边
+            x = panel.left() - self.GAP - self.width()
+        x = max(g.left(), min(x, g.right() + 1 - self.width()))
+        y = max(g.top(), min(y_center - self.height() // 2, g.bottom() + 1 - self.height()))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, e):
+        p = painter(self)
+        r = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QtGui.QPen(theme.text(0.18), 1))
+        p.setBrush(theme.card(0.98))
+        p.drawRoundedRect(r, 10, 10)
+        if self._pm is None or self._pm.isNull():
+            return
+        inner = r.adjusted(self.PAD, self.PAD, -self.PAD, -self.PAD)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(inner, 7, 7)
+        p.save()
+        p.setClipPath(path)
+        p.drawPixmap(inner, self._pm, QtCore.QRectF(self._pm.rect()))
+        p.restore()
+
 
 class ClipRow(Hoverable):
-    """一条剪贴板记录：点击复制；右侧图钉（置顶）和 X（删除）。"""
+    """一条剪贴板记录（单行 40px），点击复制；悬停时右侧出现置顶 / 删除。
+
+    左侧 20×20：图片显示缩略图（悬停弹出大图预览），颜色值显示色块，其余显示三横线符号；
+    中间单行省略（多行内容在尾部标 +N 行）；右端是绝对时间，悬停时换成两个按钮。
+    """
     pin_toggled = QtCore.Signal()
     delete_clicked = QtCore.Signal()
+    H = 40
+    TIME_W = 76          # 放得下 "2026/11/17 23:48"（72px）+ 余量
 
     def __init__(self, item: dict, parent=None):
         super().__init__(parent)
         self.item = item
         self.flash = 0.0
+        self._hot = None
+        self._pv_on = False
         th = item.get("thumb")
         self.pm = QtGui.QPixmap.fromImage(th) if isinstance(th, QtGui.QImage) and not th.isNull() else None
-        self.setMinimumHeight(150)
-
-    def resizeEvent(self, e):
-        # 接近正方形：高度跟随宽度
-        h = max(150, round(self.width() * 0.82))
-        if self.height() != h:
-            self.setFixedHeight(h)
+        text = item.get("text") or ""
+        self.color = color_of(text) if item.get("kind") == "text" else None
+        self.label = self._label(item, text)
+        lines = [ln for ln in text.splitlines() if ln.strip()] if item.get("kind") == "text" else []
+        self.extra = max(0, len(lines) - 1)
+        self.time_text = abs_time(item.get("time", 0))
+        self.setFixedHeight(self.H)
         self.setMouseTracking(True)
-        self._hot = None
+        self._pv_timer = QtCore.QTimer(self, singleShot=True, interval=160, timeout=self._show_preview)
 
-    def _pin_rect(self):
-        return QtCore.QRectF(self.width() - 66, self.height() - 34, 26, 26)
+    @staticmethod
+    def _label(item: dict, text: str) -> str:
+        if item.get("kind") == "image":
+            sz = item.get("size")
+            return f"图片 {sz[0]}×{sz[1]}" if sz else "图片"
+        return " ".join(text.split())
 
-    def _del_rect(self):
-        return QtCore.QRectF(self.width() - 36, self.height() - 34, 26, 26)
+    def _thumb_rect(self):
+        return QtCore.QRectF(10, self.height() / 2 - 10, 20, 20)
+
+    def _btn_rects(self):
+        cy = self.height() / 2
+        return (QtCore.QRectF(self.width() - 60, cy - 11, 22, 22),
+                QtCore.QRectF(self.width() - 34, cy - 11, 22, 22))
 
     def mouseMoveEvent(self, e):
-        hot = "pin" if self._pin_rect().contains(e.position()) else "del" if self._del_rect().contains(e.position()) else None
+        pin_r, del_r = self._btn_rects()
+        hot = "pin" if pin_r.contains(e.position()) else "del" if del_r.contains(e.position()) else None
         if hot != self._hot:
             self._hot = hot
             self.update()
+        on_thumb = hot is None and self.pm is not None and self._thumb_rect().contains(e.position())
+        if on_thumb and not self._pv_on:
+            self._pv_on = True
+            self._pv_timer.start()
+        elif not on_thumb and self._pv_on:
+            self._pv_on = False
+            self._pv_timer.stop()
+            ImagePreview.hide_preview()
+
+    def leaveEvent(self, e):
+        if self._hot:
+            self._hot = None
+            self.update()
+        if self._pv_on:
+            self._pv_on = False
+            self._pv_timer.stop()
+            ImagePreview.hide_preview()
+        super().leaveEvent(e)
+
+    def _show_preview(self):
+        if self.pm is None or not self._pv_on:
+            return
+        thumb = self._thumb_rect()
+        top_left = self.mapToGlobal(thumb.topLeft().toPoint())
+        win = self.window()
+        # Island.body 才是可见面板（胶囊 / 展开卡片）的本体矩形；窗口比它宽 2×130px（两侧透明留白）
+        body = getattr(win, "body", None)
+        if win is not None and isinstance(body, QtCore.QRectF) and body.width() > 1:
+            panel = QtCore.QRect(win.mapToGlobal(body.topLeft().toPoint()), body.size().toSize())
+        elif win is not None:
+            panel = win.frameGeometry()
+        else:
+            panel = QtCore.QRect(top_left, self.size())
+        ImagePreview.instance().show_for(self.pm, panel, top_left.y() + thumb.height() / 2)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            if self._pin_rect().contains(e.position()):
+            pin_r, del_r = self._btn_rects()
+            if pin_r.contains(e.position()):
                 self.pin_toggled.emit()
                 return
-            if self._del_rect().contains(e.position()):
+            if del_r.contains(e.position()):
                 self.delete_clicked.emit()
                 return
         super().mouseReleaseEvent(e)
@@ -62,6 +236,7 @@ class ClipRow(Hoverable):
     def mark_copied(self):
         self.flash = 1.0
         self.update()
+
         def off():
             try:
                 self.flash = 0.0
@@ -72,70 +247,95 @@ class ClipRow(Hoverable):
 
     def paintEvent(self, e):
         p = painter(self)
-        r = QtCore.QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        sc = self.press_scale()
-        p.translate(r.center())
-        p.scale(sc, sc)
-        p.translate(-r.center())
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(theme.active_pill() if self.flash else theme.card(0.75 + 0.8 * self._hover.x))
-        p.drawRoundedRect(r, 18, 18)
-        body = QtCore.QRectF(r.x() + 12, r.y() + 12, r.width() - 24, r.height() - 48)
+        r = QtCore.QRectF(self.rect()).adjusted(0, 1, 0, -1)
         if self.flash:
-            p.setFont(ui_font(14, W.DemiBold))
-            p.setPen(theme.pill_text())
-            p.drawText(body, Qt.AlignmentFlag.AlignCenter, "已复制")
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.active_pill())
+            p.drawRoundedRect(r, 9, 9)
+        elif self._hover.x > 0.01:
+            c = theme.hover()
+            c.setAlphaF(c.alphaF() * self._hover.x)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawRoundedRect(r, 9, 9)
+
+        fg = theme.pill_text() if self.flash else theme.text(0.92)
+        fg2 = theme.pill_text(0.75) if self.flash else theme.text3()
+        mid = r.center().y()
+
+        # ---- 左侧标记 ----
+        ic = QtCore.QRectF(r.x() + 10, mid - 10, 20, 20)
+        if self.color is not None:
+            p.setPen(QtGui.QPen(theme.text(0.22), 1))
+            p.setBrush(self.color)
+            p.drawRoundedRect(ic.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
         elif self.pm is not None:
             path = QtGui.QPainterPath()
-            path.addRoundedRect(body, 10, 10)
-            p.save()
-            p.setClipPath(path)
-            p.setBrush(theme.track())
-            p.drawRoundedRect(body, 10, 10)
-            img = self.pm.scaled(body.size().toSize() * 2, Qt.AspectRatioMode.KeepAspectRatio,
+            path.addRoundedRect(ic, 5, 5)
+            side = int(ic.width() * 2)                    # 2 倍图，避免缩放发虚
+            img = self.pm.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                                  Qt.TransformationMode.SmoothTransformation)
-            img.setDevicePixelRatio(2)
-            off = QtCore.QPointF((body.width() - img.width() / 2) / 2, (body.height() - img.height() / 2) / 2)
-            p.drawPixmap(body.topLeft() + off, img)
+            if img.isNull():
+                img = self.pm
+            p.save()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.track())
+            p.drawRoundedRect(ic, 5, 5)
+            p.setClipPath(path)
+            src = QtCore.QRectF((img.width() - side) / 2, (img.height() - side) / 2, side, side)
+            p.drawPixmap(ic, img, src)                    # 居中裁成正方形，不变形
             p.restore()
+            p.setPen(QtGui.QPen(theme.text(0.16), 1))     # 白底截图也看得出是个图块
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(ic.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
         else:
-            txt = " ".join((self.item.get("text") or "").split())
-            p.setFont(ui_font(12.5))
-            p.setPen(theme.text())
-            fm = QtGui.QFontMetrics(p.font())
-            lines = max(1, int(body.height() // fm.lineSpacing()))
-            # 手动按宽度断行，最多 lines 行，末行省略
-            out, cur = [], ""
-            for ch in txt:
-                if fm.horizontalAdvance(cur + ch) > body.width():
-                    out.append(cur)
-                    cur = ch
-                    if len(out) >= lines:
-                        break
-                else:
-                    cur += ch
-            if len(out) < lines and cur:
-                out.append(cur)
-            if len(out) == lines and (len("".join(out)) < len(txt)):
-                out[-1] = fm.elidedText(out[-1] + "…", Qt.TextElideMode.ElideRight, int(body.width()))
-            for i, line in enumerate(out[:lines]):
-                p.drawText(QtCore.QRectF(body.x(), body.y() + i * fm.lineSpacing(), body.width(), fm.lineSpacing()),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
-        # 底栏：时间 · 置顶 · 删除
-        p.setFont(ui_font(10.5, num=True))
-        p.setPen(theme.text3())
-        p.drawText(QtCore.QRectF(r.x() + 14, r.bottom() - 34, 80, 30), Qt.AlignmentFlag.AlignVCenter,
-                   time.strftime("%H:%M", time.localtime(self.item.get("time", 0))))
-        pinned = self.item.get("pinned")
-        for rect, glyph, hot, base in ((self._pin_rect(), G.PIN if pinned else G.UNPIN, self._hot == "pin", 0.9 if pinned else 0.4),
-                                       (self._del_rect(), G.CLOSE, self._hot == "del", 0.4)):
-            if hot:
+            p.setPen(QtGui.QPen(fg2, 1.2))
+            for i, w in enumerate((10, 10, 6)):
+                y = mid - 4 + i * 4
+                p.drawLine(QtCore.QPointF(ic.x() + 4, y), QtCore.QPointF(ic.x() + 4 + w, y))
+
+        # ---- 文本（单行省略）+ 多行提示 ----
+        right = r.right() - 12
+        pinned = bool(self.item.get("pinned"))
+        text_right = right - self.TIME_W - 8 - (14 if pinned else 0)
+        if self.extra:
+            text_right -= 40
+        text_left = ic.right() + 8
+        p.setFont(ui_font(12.5))
+        fm = QtGui.QFontMetrics(p.font())
+        body = QtCore.QRectF(text_left, r.top(), max(10.0, text_right - text_left), r.height())
+        p.setPen(fg)
+        p.drawText(body, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   fm.elidedText(self.label, Qt.TextElideMode.ElideRight, int(body.width())))
+        if self.extra:
+            p.setFont(ui_font(10.5, num=True))
+            p.setPen(fg2)
+            p.drawText(QtCore.QRectF(text_right + 2, r.top(), 38, r.height()),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"+{self.extra} 行")
+
+        # ---- 右端：时间 / 悬停按钮 ----
+        if self._hot:
+            # 统一用图钉字形：置顶实、未置顶淡（UNPIN 的斜线图标在 11px 下糊成一团）
+            for rect, glyph, hot, base in ((self._btn_rects()[0], G.PIN,
+                                            self._hot == "pin", 0.95 if pinned else 0.5),
+                                           (self._btn_rects()[1], G.CLOSE, self._hot == "del", 0.5)):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(theme.hover())
                 p.drawEllipse(rect)
-            p.setFont(icon_font(11))
-            p.setPen(theme.text(1.0 if hot else base))
-            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, glyph)
+                p.setFont(icon_font(11))
+                p.setPen(theme.text(1.0 if hot else base))
+                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, glyph)
+        else:
+            if pinned:                        # 置顶的条目常显一个小图钉
+                p.setFont(icon_font(10))
+                p.setPen(fg2)
+                p.drawText(QtCore.QRectF(right - self.TIME_W - 14, r.top(), 14, r.height()),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, G.PIN)
+            p.setFont(ui_font(10.5, num=True))
+            p.setPen(fg2)
+            p.drawText(QtCore.QRectF(right - self.TIME_W, r.top(), self.TIME_W, r.height()),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       "已复制" if self.flash else self.time_text)
 
 
 class ClipboardPage(Page):
@@ -147,12 +347,9 @@ class ClipboardPage(Page):
         self.clear_btn = clear
         clear.clicked.connect(lambda: ctx.clipboard.clear())
         self.sc = ScrollArea()
-        self.list = QtWidgets.QGridLayout(self.sc.inner)
-        self.list.setContentsMargins(36, 2, 40, 10)     # 与两侧边缘留出更大距离
-        self.list.setHorizontalSpacing(22)
-        self.list.setVerticalSpacing(20)
-        self.list.setColumnStretch(0, 1)
-        self.list.setColumnStretch(1, 1)
+        self.list = QtWidgets.QVBoxLayout(self.sc.inner)
+        self.list.setContentsMargins(12, 2, 14, 8)
+        self.list.setSpacing(2)
         self.setLayout(vbox(hbox(None, clear, margins=(0, 0, 14, 0)), (self.sc, 1), spacing=6))
         ctx.clipboard.changed.connect(self._changed)
         self._dirty = True
@@ -166,25 +363,23 @@ class ClipboardPage(Page):
 
     def refresh(self):
         self._dirty = False
+        ImagePreview.hide_preview()
         while self.list.count():
             it = self.list.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
-        q = ""
         n = 0
         for item in self.ctx.clipboard.items():
-            if q and (item.get("kind") != "text" or q not in (item.get("text") or "").lower()):
-                continue
             row = ClipRow(item)
             iid = item["id"]
             row.clicked.connect(lambda iid=iid, row=row: self._copy(iid, row))
             row.pin_toggled.connect(lambda iid=iid, it=item: self.ctx.clipboard.pin(iid, not it.get("pinned")))
             row.delete_clicked.connect(lambda iid=iid: self.ctx.clipboard.remove(iid))
-            self.list.addWidget(row, n // 2, n % 2)
+            self.list.addWidget(row)
             if self._just and self._just[0] == iid and time.monotonic() - self._just[1] < 0.9:
                 row.mark_copied()
             n += 1
-        self.list.setRowStretch(max(1, (n + 1) // 2), 1)
+        self.list.addStretch(1)
         self.sc.setVisible(n > 0)
         self.clear_btn.setVisible(n > 0)
         self.set_height(400 if n > 0 else 150)        # 没有内容时回到默认高度
@@ -199,6 +394,10 @@ class ClipboardPage(Page):
         super().on_show()
         if self._dirty:
             self.refresh()
+
+    def on_hide(self):
+        super().on_hide()
+        ImagePreview.hide_preview()          # 换页 / 收起时别把大图留在屏幕上
 
 
 class LiveView(QtWidgets.QWidget):
