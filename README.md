@@ -38,7 +38,7 @@
 | **分叉基点** | `11ebd0f` — 2026-11-10，即 **v1.2.2 之后 1 个提交**（v1.2.2 = `3f1ec1d`） |
 | 分叉日期 | 2026-11-17 |
 | 上游最新（核对于 2026-11-17） | `11ebd0f` — 2026-11-10 |
-| **同步状态** | ✅ 已与上游同步（上游自分叉后无新提交）；本 fork 在此基础上另有 7 个提交（截至 2026-11-18），见下方时间线 |
+| **同步状态** | ✅ 已与上游同步（上游自分叉后无新提交）；本 fork 在此基础上另有 8 个提交（截至 2026-11-18），见下方时间线 |
 
 > 维护约定：每次从上游同步后，更新本表的「上游最新」「同步状态」，并在下面的时间线里加一节，写清这次合并带进来的上游新功能、以及为适配它们所做的改动。
 
@@ -132,6 +132,27 @@
 | `compact.stats.cpu` / `.mem` / `.net` | `true` | 收起态显示哪几项；全关掉则不采样、胶囊回到原来的 150 宽 |
 | `compact.interval` | `1.0` | 采样间隔（秒），限制在 0.5~10 |
 | `island.auto_cycle_idle_s` | `60` | 键鼠空闲多久之后才开始自动轮换，`0` = 不判断空闲 |
+
+### 2026-11-18 · 修「连续重启会留下一个控制台窗口」（`0a88e3d`，2 个文件 +63 / −26）
+
+**现象**：点两次以上「重启 wisland」，桌面上会多出一个终端窗口（默认终端是 Windows Terminal 时是一个新标签页），关掉它灵动岛也跟着退出；第一次重启却是干净的。
+
+**根因（实测确认）**：`spawn_restart` 用 `sys.executable` 拉起新实例，而 uv 创建的 `.venv` 里 `Scripts\python.exe` 与 `Scripts\pythonw.exe` **都是控制台程序**（PE 头 Subsystem = 3）。`DETACHED_PROCESS` 的语义是「不继承父进程的控制台」，它**并不能**阻止系统给控制台程序再分配一个窗口。用同一个无控制台的 `pythonw` 父进程、同一个 `.venv\Scripts\python.exe` 做对照：
+
+| 创建标志 | 子进程 `GetConsoleWindow()` |
+| --- | --- |
+| `CREATE_NO_WINDOW`（0x08000000） | `0` — 没有窗口 |
+| `DETACHED_PROCESS`（0x00000008） | `1051646` — 一个真实窗口 |
+
+于是新实例带着控制台跑，关窗口就等价于关程序。
+
+**为什么第二次才出现**：`run.pyw` 本来有一条自愈逻辑——发现自己挂在控制台上就换基础解释器的 `pythonw.exe` 重生，并用 `WISLAND_RELAUNCHED` 防止无限重生。但这个变量会被重启链一代代继承：第一代完成自愈后，第二代起自愈被永久关掉，控制台就留下来了。
+
+**改法**
+- `relaunch.py`：新增 `windowless_exe()`——扫描候选目录，按 **PE Subsystem == 2** 挑出真正的窗口子系统 `pythonw.exe`，并用 `__PYVENV_LAUNCHER__` 指回 venv（这样依赖仍来自 `.venv`）；一个 GUI 解释器都找不到时才退回 `CREATE_NO_WINDOW`。新增 `child_env()`，每次启动前清掉 `WISLAND_RELAUNCHED`（也清理 `__PYVENV_LAUNCHER__` 的继承问题）。创建标志拆成 `FLAGS_GUI` / `FLAGS_CONSOLE`。
+- `run.pyw`：改用同一套选择逻辑；`WISLAND_RELAUNCHED` 只用于防一次重入，读完立刻从 `os.environ` 里删掉。
+
+**验证**：以无控制台父进程派生四代，每代 `GetConsoleWindow()` 都是 `0`，`sys.prefix` 指向 `.venv`，`PySide6` 可正常导入。
 
 ---
 
