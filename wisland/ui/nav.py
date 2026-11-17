@@ -73,6 +73,24 @@ class NavBar(QtWidgets.QWidget):
     def keys(self) -> list[str]:
         return [k for k, _, _ in self.items]
 
+    def set_items(self, items: list[tuple[str, str, str]]):
+        """重建标签组（设置里开关面板时用）：当前项按 key 尽量保留，弹簧从一个收起宽度重新长出。"""
+        if not items:
+            return
+        cur = self.current() if self.items else None
+        self.items = items
+        fm = QtGui.QFontMetrics(self.font_)
+        self.full_w = [ICON_W + fm.horizontalAdvance(lbl) + 46 for _, _, lbl in items]
+        self.w = [Spring(ICON_W, 260, 0.56, 0.05) for _ in items]
+        self.hover = [Spring(0, 400, 1.0, 0.01) for _ in items]
+        keys = self.keys()
+        self.badges = {k: n for k, n in self.badges.items() if k in keys}
+        self.index = keys.index(cur) if cur in keys else 0
+        self.w[self.index].snap(self.full_w[self.index])
+        self._hover_i = -1
+        self.update()
+        self._kick()
+
     def set_current(self, key: str, emit: bool = False):
         keys = self.keys()
         if key not in keys:

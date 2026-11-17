@@ -32,6 +32,11 @@ API = "https://api.openweathermap.org/data/2.5"
 OM_API = "https://api.open-meteo.com/v1/forecast"
 OM_GEO = "https://geocoding-api.open-meteo.com/v1/search"
 
+# 天气接口一律直连：httpx 默认 trust_env=True 会通过 urllib.getproxies() 读到 Windows 注册表里的
+# 系统代理（Clash 的 127.0.0.1:7897 之类），node 一慢就变成「天气请求超时」。
+# 需要走代理时在 config.json → weather.proxy 里写地址，或写 "env" 交回系统代理。
+TIMEOUT = httpx.Timeout(12.0, connect=6.0)
+
 # WMO 天气代码 -> (中文描述, OpenWeather 图标前缀)；图标前缀复用现有的字形映射
 _WMO = {
     0: ("晴", "01"), 1: ("晴间多云", "02"), 2: ("多云", "03"), 3: ("阴", "04"),
@@ -225,13 +230,22 @@ class WeatherService(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         ui(lambda: None)
-        self._client = httpx.Client(timeout=httpx.Timeout(12.0, connect=6.0), follow_redirects=True)
+        self._client = self._mk_client()
         self._busy = False
         self._again = False
         self.last: dict = {}
         self.cities_data: list[dict] = []
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self.refresh)
+
+    def _mk_client(self) -> httpx.Client:
+        """按 weather.proxy 建客户端：默认直连，忽略系统 / 环境变量里的代理。"""
+        proxy = str(cfg.get("weather.proxy") or "").strip()
+        self._proxy_cfg = proxy
+        if proxy == "env":
+            return httpx.Client(timeout=TIMEOUT, follow_redirects=True)
+        return httpx.Client(timeout=TIMEOUT, follow_redirects=True,
+                            proxy=proxy or None, trust_env=False)
 
     # ---------- 城市列表 ----------
     def cities(self) -> list[dict]:
@@ -313,6 +327,8 @@ class WeatherService(QtCore.QObject):
         if self._busy:
             self._again = True
             return
+        if str(cfg.get("weather.proxy") or "").strip() != getattr(self, "_proxy_cfg", None):
+            self._client = self._mk_client()          # 改过 weather.proxy 就换一个客户端
         key = str(cfg.get("weather.api_key") or "").strip()      # 空 = 用 Open-Meteo
         self._busy = True
         run_bg(self._fetch_all, key, self.cities(), on_done=self._done, on_error=self._fail)

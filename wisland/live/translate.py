@@ -114,7 +114,8 @@ def _client(base: str) -> httpx.Client:
     with _CLIENTS_LOCK:
         c = _CLIENTS.get(base)
         if c is None or c.is_closed:
-            c = make_client(base, timeout=30.0,
+            # DeepSeek 在国内：直连，不走系统代理
+            c = make_client(base, timeout=30.0, trust_env=False,
                             limits=httpx.Limits(max_connections=8, max_keepalive_connections=8,
                                                 keepalive_expiry=120))
             _CLIENTS[base] = c

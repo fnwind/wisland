@@ -34,6 +34,12 @@ DEFAULTS: dict = {
         "auto_cycle_s": 30,         # 时间天气与小形象自动轮换的间隔（秒），0 = 不轮换
         "passthrough": False,       # 可穿透：鼠标穿过灵动岛，只响应右键（不影响展开 / 收起）
     },
+    # 顶部导航要显示哪些页面：把不要的 key 写进 hidden 就不创建它（主页是导航锚点，不能隐藏）
+    # key: home / msg / stock / weather / ctl / clip / trans（见 ui/pages/*）
+    # 隐藏 stock 时股票行情服务也不会启动，不会再有行情请求和涨跌提醒
+    "pages": {
+        "hidden": [],
+    },
     "hotkeys": {
         "toggle": "Ctrl+Alt+I",
         "translate": "Ctrl+Alt+J",
@@ -74,6 +80,7 @@ DEFAULTS: dict = {
     },
     "weather": {
         "api_key": "",         # 留空 = 使用 Open-Meteo（免费、无需 Key）；填 OpenWeather Key 则改用 OpenWeather
+        "proxy": "",           # 留空 = 直连（不经过系统 / 环境变量里的代理）；"env" = 跟随系统代理；也可填 http://127.0.0.1:7897
         "city": "上海",
         "lat": None,
         "lon": None,

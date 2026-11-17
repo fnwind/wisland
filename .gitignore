@@ -17,3 +17,6 @@ models/
 
 # 宣传视频素材与输出
 promo/
+
+# 工作区数据（WorkBuddy 的会话记忆等）
+.workbuddy/

@@ -68,7 +68,8 @@ class LyricsService(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         ui(lambda: None)
-        self._client = httpx.Client(timeout=httpx.Timeout(8.0, connect=4.0), headers=HEADERS)
+        # 网易云是国内站点：直连，不走系统代理（trust_env=True 会读注册表里的 Clash 系统代理）
+        self._client = httpx.Client(timeout=httpx.Timeout(8.0, connect=4.0), headers=HEADERS, trust_env=False)
         self._cache: dict[str, Lyrics | None] = {}
         self._pending: set[str] = set()
         self._lock = threading.Lock()

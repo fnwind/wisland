@@ -17,6 +17,9 @@
     "auto_cycle_s": 30,
     "passthrough": false
   },
+  "pages": {
+    "hidden": []
+  },
   "hotkeys": {
     "toggle": "Ctrl+Alt+I",
     "translate": "Ctrl+Alt+J",
@@ -90,6 +93,7 @@
   },
   "weather": {
     "api_key": "",
+    "proxy": "",
     "city": "上海",
     "lat": null,
     "lon": null,

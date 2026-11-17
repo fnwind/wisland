@@ -67,6 +67,24 @@ def _G():
     return G
 
 
+def toggle_page(island, ctx, key: str):
+    """设置 → 面板：立刻显示 / 隐藏一个页面，并写回 config.json → pages.hidden。"""
+    on = not island.page_visible(key)
+    island.set_page_visible(key, on)
+    hide = {k for k in (cfg.get("pages.hidden") or [])}
+    if on:
+        hide.discard(key)
+    else:
+        hide.add(key)
+    cfg.set("pages.hidden", [k for k in island.page_keys() if k in hide])
+    cfg.save()
+    if key == "stock":                        # 行情只在股票页可见时轮询
+        if on:
+            ctx.stocks.start()
+        else:
+            ctx.stocks.stop()
+
+
 def autostart_enabled() -> bool:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
@@ -108,6 +126,21 @@ def set_autostart(on: bool):
                 pass
 
 
+def _lock_holder_dead(lock: QtCore.QLockFile) -> bool:
+    """锁文件里记的进程是否已经不存在（任务管理器强杀、崩溃、上次没退干净）。"""
+    try:
+        pid = lock.getLockInfo()[0]
+    except Exception:  # noqa: BLE001
+        return False
+    if not pid:
+        return False
+    try:
+        import psutil
+        return not psutil.pid_exists(int(pid))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def main():
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
     app = QtWidgets.QApplication(sys.argv)
@@ -116,10 +149,13 @@ def main():
     bg.init()
 
     lock = QtCore.QLockFile(str(DATA_DIR / "wisland.lock"))
-    lock.setStaleLockTime(0)
+    lock.setStaleLockTime(0)          # 不按时间判过期：只要有活着的进程持锁就算在运行
     if not lock.tryLock(100):
-        print("wisland 已在运行")
-        return 0
+        if _lock_holder_dead(lock):   # 上次被强杀 / 崩溃会留下锁文件，pid 已不在就清掉重试
+            lock.removeStaleLockFile()
+        if not lock.tryLock(100):
+            print("wisland 已在运行")
+            return 0
     fix_autostart()
 
     from .services.audio import AudioService, BrightnessService
@@ -165,6 +201,8 @@ def main():
     ctx.windows.notice.connect(lambda t: ctx.island and ctx.island.activity({"glyph": _G().MESSAGE, "title": t}, 5.0))
     ctx.island = None
 
+    # 导航页：全部构造好（隐藏的只是不进导航，见 Island.set_page_visible），初始隐藏由 pages.hidden 决定
+    hidden = [str(k) for k in (cfg.get("pages.hidden") or [])]
     pages = [HomePage(ctx), MessagesPage(ctx), StocksPage(ctx), WeatherPage(ctx), ControlsPage(ctx),
              ClipboardPage(ctx), TranslatePage(ctx)]
     ctx.pages = {p.key: p for p in pages}
@@ -176,7 +214,7 @@ def main():
         except Exception:  # noqa: BLE001
             return 0.0
 
-    island = Island(pages, peak_fn=peak)
+    island = Island(pages, peak_fn=peak, hidden=hidden)
     ctx.island = island
     compact = island.compact
 
@@ -299,6 +337,7 @@ def main():
         {"kind": "mail", "name": "邮件", "source": "imap", "time": time.time()}))
 
     # ---------------- 股票 ----------------
+    # 页面对象一直在；行情服务是否轮询由导航里有没有股票页决定（见下面的 services）
     ctx.stocks.updated.connect(P["stock"].set_data)
 
     def on_stock_alert(a):
@@ -368,6 +407,7 @@ def main():
         cfg.load()
         theme.set_mode(cfg.get("island.theme", "auto"))
         island.register_hotkeys()
+        island.set_pages_hidden(cfg.get("pages.hidden") or [])
         P["home"].build_launcher()
         ctx.weather.refresh()
         island.activity({"glyph": G.CHECK, "title": "配置已重新加载"}, 1.8)
@@ -383,6 +423,12 @@ def main():
         for mode, label in (("hover", "悬停展开"), ("always", "常驻展开"), ("never", "长关")):
             a = em.addAction(("✓  " if island.expand_mode() == mode else "    ") + label)
             a.triggered.connect(lambda _=False, m=mode: island.set_expand_mode(m))
+        pm = menu.addMenu("面板")
+        for key in island.page_keys():
+            if key == "home" or key not in P:      # 主页是导航锚点，不给开关
+                continue
+            a = pm.addAction(("✓  " if island.page_visible(key) else "    ") + P[key].title)
+            a.triggered.connect(lambda _=False, k=key: toggle_page(island, ctx, k))
         a = menu.addAction(("✓  " if island.passthrough() else "    ") + "可穿透")
         a.triggered.connect(lambda: island.set_passthrough(not island.passthrough()))
         a = menu.addAction(("✓  " if island.capture_visible() else "    ") + "参与截图")
@@ -468,9 +514,14 @@ def main():
     fs_timer = QtCore.QTimer(app, interval=1000, timeout=check_fullscreen)
 
     # ---------------- 启动 ----------------
+    # 股票行情只在导航里有股票页时才轮询（设置 → 面板里关掉它就不发请求、不弹提醒）
+    services = [ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.windows, ctx.notify,
+                ctx.stocks, ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn]
+
     island.show()
-    for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.windows, ctx.notify, ctx.stocks,
-              ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
+    for s in services:
+        if s is ctx.stocks and not island.page_visible("stock"):
+            continue
         try:
             if hasattr(s, "start"):
                 s.start()
@@ -480,8 +531,7 @@ def main():
 
     def shutdown():
         ctx.live.stop(wait=True)
-        for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.notify, ctx.stocks,
-                  ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
+        for s in services:
             try:
                 s.stop()
             except Exception:  # noqa: BLE001

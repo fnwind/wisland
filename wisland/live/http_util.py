@@ -80,7 +80,13 @@ def is_local_url(url: str) -> bool:
     return ip.is_loopback or ip.is_private or ip.is_link_local    # 本机与局域网（手机）不走代理
 
 
-def make_client(url: str = "", timeout=30.0, **kwargs) -> httpx.Client:
-    """创建 httpx 客户端；本地地址不使用环境代理，远程地址照常使用。"""
+def make_client(url: str = "", timeout=30.0, trust_env: bool | None = None, **kwargs) -> httpx.Client:
+    """创建 httpx 客户端。
+
+    默认规则：本地 / 局域网地址不走代理，远程地址照常使用系统代理；
+    trust_env 显式传了就按传的来（例如 DeepSeek 这类国内接口要强制直连）。
+    """
     kwargs.setdefault("follow_redirects", True)
-    return httpx.Client(timeout=timeout, trust_env=not is_local_url(url), **kwargs)
+    if trust_env is None:
+        trust_env = not is_local_url(url)
+    return httpx.Client(timeout=timeout, trust_env=trust_env, **kwargs)

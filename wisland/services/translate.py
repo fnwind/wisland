@@ -123,8 +123,10 @@ class TranslateService(QtCore.QObject):
     def _http(self) -> httpx.Client:
         with self._client_lock:
             if self._client is None or self._client.is_closed:
+                # DeepSeek 在国内：直连，不走系统代理（国内接口绕道 Clash 只会更慢 / 更容易超时）
                 self._client = httpx.Client(
                     timeout=httpx.Timeout(30.0, connect=8.0, read=20.0), follow_redirects=True,
+                    trust_env=False,
                     limits=httpx.Limits(max_connections=4, max_keepalive_connections=4, keepalive_expiry=120))
             return self._client
 

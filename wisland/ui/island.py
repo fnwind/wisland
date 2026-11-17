@@ -213,7 +213,7 @@ class Island(QtWidgets.QWidget):
 
     play_pause_requested = QtCore.Signal()      # 收起态音乐视图的播放 / 暂停键
 
-    def __init__(self, pages: list, peak_fn=None):
+    def __init__(self, pages: list, peak_fn=None, hidden=None):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setWindowTitle("wisland")
@@ -275,12 +275,19 @@ class Island(QtWidgets.QWidget):
         self._dirty = QtCore.QRect()
 
         # ---- 展开内容 ----
+        # 页面对象全部构造好，导航里只放 pages.hidden 之外的（设置里可以随时开关，见 set_page_visible）
         self.content = QtWidgets.QWidget(self)
-        self.nav = NavBar([(pg.key, pg.glyph, pg.title) for pg in pages], self.content, NAV_H)
-        self.stack = QtWidgets.QStackedWidget(self.content)
+        self._all_pages = {pg.key: pg for pg in pages}
+        self._page_order = [pg.key for pg in pages]
         for pg in pages:
-            self.stack.addWidget(pg)
             pg.island = self
+        hide = {str(k) for k in (hidden or ())}
+        visible = [k for k in self._page_order if k not in hide] or self._page_order[:1]
+        self.pages: list = [self._all_pages[k] for k in visible]
+        self.nav = NavBar([(pg.key, pg.glyph, pg.title) for pg in self.pages], self.content, NAV_H)
+        self.stack = QtWidgets.QStackedWidget(self.content)
+        for pg in self.pages:
+            self.stack.addWidget(pg)
         lay = QtWidgets.QVBoxLayout(self.content)
         lay.setSpacing(8)
         self._content_lay = lay
@@ -436,6 +443,65 @@ class Island(QtWidgets.QWidget):
             self.sw.to(w, 440, 0.6)
             self.sh.to(h, 440, 0.6)
         self._kick()
+
+    # ---------------- 面板开关（设置 → 面板） ----------------
+    def page_keys(self) -> list[str]:
+        """全部页面 key（含当前被隐藏的），按固定顺序。"""
+        return list(self._page_order)
+
+    def page_visible(self, key: str) -> bool:
+        return any(pg.key == key for pg in self.pages)
+
+    def _apply_pages(self, keys: list[str]):
+        """按 keys 顺序重排导航与页面栈：隐藏的页面留在 _all_pages 里，不进导航也不进栈。
+
+        页面对象不销毁，数据和槽连接都还在，重新打开时是热的。
+        """
+        keys = [k for k in keys if k in self._all_pages] or self._page_order[:1]
+        if keys == [pg.key for pg in self.pages]:
+            return
+        old = self.pages[self.stack.currentIndex()] if self.pages else None
+        self.pages = [self._all_pages[k] for k in keys]
+        for pg in self._all_pages.values():
+            if self.stack.indexOf(pg) >= 0:
+                self.stack.removeWidget(pg)
+        for pg in self.pages:
+            self.stack.addWidget(pg)
+        self.nav.set_items([(pg.key, pg.glyph, pg.title) for pg in self.pages])
+        keys_now = self.nav.keys()
+        if self._page_key not in keys_now:
+            self._page_key = keys_now[0]                    # 当前页被关掉 -> 回主页
+        self.nav.set_current(self._page_key)
+        self.stack.setCurrentIndex(keys_now.index(self._page_key))
+        cur = self.pages[self.stack.currentIndex()]
+        if self.expanded and old is not None and old is not cur:
+            old.on_hide()
+            self._defer_show(cur)
+        if self.expanded:
+            w, h = self.target_size()
+            self.sw.to(w, 440, 0.6)
+            self.sh.to(h, 440, 0.6)
+        self._kick()
+
+    def set_page_visible(self, key: str, on: bool):
+        """显示 / 隐藏一个页面（home 是导航锚点，不允许隐藏）。"""
+        if key == "home" or key not in self._all_pages:
+            return
+        vis = [pg.key for pg in self.pages]
+        if on:
+            if key in vis:
+                return
+            vis = [k for k in self._page_order if k in vis or k == key]
+        else:
+            if key not in vis or len(vis) <= 1:
+                return
+            vis = [k for k in vis if k != key]
+        self._apply_pages(vis)
+
+    def set_pages_hidden(self, hidden):
+        """按配置里的 pages.hidden 重新排一遍（「重新加载配置」用）。"""
+        hide = {str(k) for k in (hidden or ())} - {"home"}
+        self._apply_pages([k for k in self._page_order if k not in hide])
 
     def _defer_show(self, pg):
         """页面的数据刷新稍后执行，让形变动画先跑起来。"""
