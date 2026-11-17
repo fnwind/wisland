@@ -28,8 +28,8 @@ STAT_CRIT, STAT_WARN = 92.0, 80.0     # 占用告警阈值（%）
 STAT_LEAD = 36.0                      # 时间与读数之间的固定间距
 STAT_GAP = 0.0                       # 读数与天气之间的间距
 STAT_SLOT = 8.0                      # 各读数项之间的固定间距
-STAT_RING = 16.0                      # 圆环占位宽度（直径 13 + 1px 余量）
-STAT_MGAP = 3.0                       # 圆环 / 箭头与读数之间的贴边间距
+STAT_RING = 16.0                      # 圆环占位宽度（直径 13 + 3px 余量）
+STAT_MGAP = 2.0                       # 圆环 / 箭头与读数之间的贴边间距
 _WARN_COLOR = "#EF9F27"
 
 
