@@ -149,7 +149,7 @@
 **为什么第二次才出现**：`run.pyw` 本来有一条自愈逻辑——发现自己挂在控制台上就换基础解释器的 `pythonw.exe` 重生，并用 `WISLAND_RELAUNCHED` 防止无限重生。但这个变量会被重启链一代代继承：第一代完成自愈后，第二代起自愈被永久关掉，控制台就留下来了。
 
 **改法**
-- `relaunch.py`：新增 `windowless_exe()`——扫描候选目录，按 **PE Subsystem == 2** 挑出真正的窗口子系统 `pythonw.exe`，并用 `__PYVENV_LAUNCHER__` 指回 venv（这样依赖仍来自 `.venv`）；一个 GUI 解释器都找不到时才退回 `CREATE_NO_WINDOW`。新增 `child_env()`，每次启动前清掉 `WISLAND_RELAUNCHED`（也清理 `__PYVENV_LAUNCHER__` 的继承问题）。创建标志拆成 `FLAGS_GUI` / `FLAGS_CONSOLE`。
+- `relaunch.py`：新增 `windowless_exe()`——扫描候选目录，按 **PE Subsystem == 2** 挑出真正的窗口子系统 `pythonw.exe`，并用 `__PYVENV_LAUNCHER__` 指回 venv（这样依赖仍来自 `.venv`）；一个 GUI 解释器都找不到时才退回 `CREATE_NO_WINDOW`。新增 `child_env()`，每次启动前清掉 `WISLAND_RELAUNCHED`。创建标志拆成 `FLAGS_GUI` / `FLAGS_CONSOLE`。
 - `run.pyw`：改用同一套选择逻辑；`WISLAND_RELAUNCHED` 只用于防一次重入，读完立刻从 `os.environ` 里删掉。
 
 **验证**：以无控制台父进程派生四代，每代 `GetConsoleWindow()` 都是 `0`，`sys.prefix` 指向 `.venv`，`PySide6` 可正常导入。
