@@ -32,6 +32,7 @@ DEFAULTS: dict = {
         "pinned": False,            # 旧版"保持展开"（兼容）
         "compact_view": "clock",    # 收起态视图：clock / pet / music（滚轮切换）
         "auto_cycle_s": 30,         # 时间天气与小形象自动轮换的间隔（秒），0 = 不轮换
+        "auto_cycle_idle_s": 60,    # 键鼠停止这么久之后才开始轮换；期间保持监控读数（0 = 不判断空闲）
         "passthrough": False,       # 可穿透：鼠标穿过灵动岛，只响应右键（不影响展开 / 收起）
     },
     # 顶部导航要显示哪些页面：把不要的 key 写进 hidden 就不创建它（主页是导航锚点，不能隐藏）
@@ -131,6 +132,10 @@ DEFAULTS: dict = {
         "source": "",
     },
     "clipboard": {"max": 10},      # 只保留最近 10 条（置顶的不计）
+    "compact": {
+        "stats": {"cpu": True, "mem": True, "net": True},   # 收起态胶囊里显示哪些读数，false 关掉
+        "interval": 1.0,                                    # 采样间隔（秒），0.5~10
+    },
     "launcher": [
         {"name": "文件资源管理器", "path": "C:/Windows/explorer.exe"},
     ],

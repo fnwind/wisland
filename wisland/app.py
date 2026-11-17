@@ -180,7 +180,8 @@ def main():
     from .services.media import MediaService
     from .services.notify import NotifyService
     from .services.stocks import StockService
-    from .services.system import RadioService, WindowService
+    from .services.sysstat import SysStatService
+    from .services.system import RadioService, WindowService, idle_seconds
     from .services.lyrics import LyricsService
     from .services.translate import TranslateService
     from .services.weather import WeatherService, weather_glyph
@@ -207,6 +208,7 @@ def main():
     ctx.lyrics = LyricsService()
     ctx.clipboard = ClipboardService()
     ctx.mailcheck = MailCheckService()
+    ctx.sysstat = SysStatService()
     from .live.service import LiveService
     ctx.live = LiveService()
     from .learn.service import LearnService
@@ -371,6 +373,12 @@ def main():
         island._kick()
     ctx.weather.updated.connect(on_weather)
 
+    # ---------------- 系统资源（收起态胶囊） ----------------
+    def on_stat(d):
+        compact.stat = d
+        island._kick()
+    ctx.sysstat.updated.connect(on_stat)
+
     # ---------------- 翻译 ----------------
     ctx.translate.finished.connect(ctx.actions.on_translated)
     ctx.translate.failed.connect(ctx.actions.on_trans_failed)
@@ -423,6 +431,11 @@ def main():
         theme.set_mode(cfg.get("island.theme", "auto"))
         island.register_hotkeys()
         island.set_pages_hidden(cfg.get("pages.hidden") or [])
+        compact.refresh_stats()
+        if compact._stats:
+            ctx.sysstat.start()          # 幂等：顺带按新 interval 重起定时器
+        else:
+            ctx.sysstat.stop()
         P["home"].build_launcher()
         ctx.weather.refresh()
         island.activity({"glyph": G.CHECK, "title": "配置已重新加载"}, 1.8)
@@ -513,15 +526,34 @@ def main():
     tray.activated.connect(lambda r: island.toggle() if r == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger else None)
     tray.show()
 
-    # ---------------- 收起态：时间天气与小形象每隔几十秒自动轮换 ----------------
-    def auto_cycle():
-        if island.expanded or island.passthrough() or compact.view not in ("clock", "pet"):
-            return
-        compact.set_view("pet" if compact.view == "clock" else "clock")
-        island._kick()
+    # ---------------- 收起态：空闲一会儿之后再在「时间天气」与「小形象」之间轮换 ----------------
     cyc = int(cfg.get("island.auto_cycle_s", 30) or 0)
     if cyc > 0:
-        QtCore.QTimer(app, interval=cyc * 1000, timeout=auto_cycle).start()
+        cyc_t = {"at": time.monotonic()}
+
+        def auto_cycle():
+            if island.expanded or island.passthrough() or compact.view not in ("clock", "pet"):
+                return
+            try:
+                idle_need = float(cfg.get("island.auto_cycle_idle_s", 60) or 0)
+            except (TypeError, ValueError):
+                idle_need = 60.0
+            # 有键鼠操作：保持监控态（时间 + 资源读数），并且重新计时
+            if idle_need > 0 and idle_seconds() < idle_need:
+                cyc_t["at"] = time.monotonic()
+                if compact.auto_view and compact.view != "clock":
+                    compact.auto_view = False
+                    compact.set_view("clock")
+                    island._kick()
+                return
+            if time.monotonic() - cyc_t["at"] < cyc:
+                return
+            compact.set_view("pet" if compact.view == "clock" else "clock")
+            compact.auto_view = True
+            cyc_t["at"] = time.monotonic()
+            island._kick()
+
+        QtCore.QTimer(app, interval=5000, timeout=auto_cycle).start()   # 5s 一查，空闲满 1 分钟后最多 5 秒内切
 
     # ---------------- 全屏时隐藏 ----------------
     def check_fullscreen():
@@ -537,11 +569,14 @@ def main():
     # ---------------- 启动 ----------------
     # 股票行情只在导航里有股票页时才轮询（设置 → 面板里关掉它就不发请求、不弹提醒）
     services = [ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.windows, ctx.notify,
-                ctx.stocks, ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn]
+                ctx.stocks, ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck,
+                ctx.learn, ctx.sysstat]
 
     island.show()
     for s in services:
         if s is ctx.stocks and not island.page_visible("stock"):
+            continue
+        if s is ctx.sysstat and not compact._stats:      # compact.stats 全关掉就不采样
             continue
         try:
             if hasattr(s, "start"):

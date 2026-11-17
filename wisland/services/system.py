@@ -48,6 +48,26 @@ except Exception:  # noqa: BLE001
     _BtAdapter = None
 
 
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.wintypes.DWORD), ("dwTime", ctypes.wintypes.DWORD)]
+
+
+def idle_seconds() -> float:
+    """系统空闲时长（距最后一次键盘 / 鼠标输入），单位秒。
+
+    用于收起态：用户在用电脑时保持监控读数，别切到小形象。
+    """
+    try:
+        info = _LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        ticks = ctypes.windll.kernel32.GetTickCount64()
+        return max(0.0, (ticks - int(info.dwTime)) / 1000.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 class RadioService(QtCore.QObject):
     """changed(dict): {wifi_on, wifi_ssid, wifi_signal(int % 或 None), bt_on,
     wifi_available, bt_available}"""

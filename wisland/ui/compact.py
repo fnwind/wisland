@@ -10,6 +10,8 @@ import time
 
 from PySide6 import QtCore, QtGui
 
+from ..core.config import cfg
+from ..services.sysstat import fmt_rate
 from .anim import clamp, ease_out
 from .theme import KIND_COLORS, G, W, icon_font, theme, ui_font
 from .widgets import rounded_pixmap
@@ -21,6 +23,14 @@ H_ACT = 40
 H_SUB = 60          # 实时字幕：上日语、下中文两行
 SUB_HOLD_S = 7.0    # 最后一句字幕之后保留多久再回到原来的视图
 W_TEXT = 640        # 显示歌词 / 实时字幕时的胶囊宽度（约为普通收起态的 3 倍）
+STAT_ORDER = ("cpu", "mem", "net")
+STAT_CRIT, STAT_WARN = 92.0, 80.0     # 占用告警阈值（%）
+STAT_LEAD = 36.0                      # 时间与读数之间的固定间距
+STAT_GAP = 0.0                       # 读数与天气之间的间距
+STAT_SLOT = 8.0                      # 各读数项之间的固定间距
+STAT_RING = 16.0                      # 圆环占位宽度（直径 13 + 1px 余量）
+STAT_MGAP = 3.0                       # 圆环 / 箭头与读数之间的贴边间距
+_WARN_COLOR = "#EF9F27"
 
 
 class PetFace:
@@ -283,12 +293,21 @@ class CompactView:
         self.activity: dict | None = None
         self.badges: dict[str, int] = {}
         self.weather: tuple | None = None   # (glyph, "18°", font_family)
+        self.stat: dict = {"cpu": 0.0, "mem": 0.0, "up": 0.0, "down": 0.0}   # 系统资源读数
+        self._stats: list[str] = []
+        self._stat_slots: list[tuple[str, float]] = []   # [(cpu|mem|up|down, 固定宽度)]
+        self._stat_w = 0.0
+        self._clock_w = 0.0
+        self._arr_w = 0.0
+        self._pct_slot = 0.0
+        self._rate_slot = 0.0
         self.ticker: list[tuple[str, float, float]] = []  # (name, price, pct)
         self._mode = "idle"
         self._mode_t = 0.0
         # 收起态视图（滚轮切换）：clock = 时间天气，pet = 可爱形象，music = 音乐
         self.views = ["clock", "pet", "music"]
         self.view = "clock"
+        self.auto_view = False                 # 当前视图是自动轮换过来的（用户手动切过就为 False）
         self._view_t = -10.0
         self.look = QtCore.QPointF(0, 0)      # 光标相对胶囊中心的位置（形象的眼睛会看过去）
         self.near = False                      # 光标在附近（形象开心）
@@ -310,6 +329,37 @@ class CompactView:
         # 收起态音乐视图右侧的播放 / 暂停键（灵动岛坐标，绘制时更新）
         self.play_rect: QtCore.QRectF | None = None
         self.play_hover = 0.0
+        self.refresh_stats()
+
+    # --- 资源读数（收起态胶囊） ---
+    @staticmethod
+    def _read_stats_conf() -> list[str]:
+        return [k for k in STAT_ORDER if cfg.get(f"compact.stats.{k}", True)]
+
+    def refresh_stats(self):
+        """重读显示项，并按「最宽读数」预先算好每个槽位的固定宽度。
+
+        槽位宽度一旦确定就不再随读数变化（3% 与 100% 占同样宽），
+        所以读数跳动时圆环、数字、箭头、整块位置全都不会位移。
+        """
+        self._stats = self._read_stats_conf()
+        fm = QtGui.QFontMetrics(ui_font(11, W.Medium, num=True))
+        unit_w = max(fm.horizontalAdvance(s) for s in ("1023", "9.9M", "999M"))   # fmt_rate 的最宽输出
+        pct_w = fm.horizontalAdvance("100%")
+        self._arr_w = fm.horizontalAdvance("\u2191")                               # 箭头字形实际宽度
+        self._pct_slot = STAT_RING + STAT_MGAP + pct_w
+        self._rate_slot = self._arr_w + STAT_MGAP + unit_w
+        slots: list[tuple[str, float]] = []
+        for k in self._stats:
+            if k in ("cpu", "mem"):
+                slots.append((k, self._pct_slot))
+            else:
+                slots.append(("up", self._rate_slot))
+                slots.append(("down", self._rate_slot))
+        self._stat_slots = slots
+        self._stat_w = sum(w for _, w in slots) + STAT_SLOT * max(0, len(slots) - 1)
+        # 时间区块的实际宽度（font 固定，"00:00" 与任何 HH:MM 等宽）
+        self._clock_w = QtGui.QFontMetrics(ui_font(15, W.DemiBold, num=True)).horizontalAdvance("00:00")
 
     # --- 数据 ---
     def set_media(self, m: dict):
@@ -379,6 +429,7 @@ class CompactView:
         i = self.views.index(self.view) if self.view in self.views else 0
         self.view = self.views[(i + (1 if d < 0 else -1)) % len(self.views)]
         self._view_t = time.monotonic()
+        self.auto_view = False          # 用户手动切的，之后不要再被「有操作就回监控」抢走
         return self.view
 
     def playing(self) -> bool:
@@ -423,8 +474,11 @@ class CompactView:
             return max(300, self._lyr_w) + 34 + nb * 12, H_MEDIA
         if m == "pet":
             return 150 + nb * 14, H_IDLE
-        w = 150 + (64 if self.weather else 0) + nb * 14
-        return w, H_IDLE
+        if self._stats:                    # 读数按内容宽度居中在「时间结束 → 天气开始」之间
+            w = 18 + self._clock_w + STAT_LEAD + self._stat_w + STAT_GAP + (64 if self.weather else 16) + 16
+        else:
+            w = 150 + (64 if self.weather else 0)
+        return w + nb * 14, H_IDLE
 
     # --- 绘制 ---
     def paint(self, p: QtGui.QPainter, r: QtCore.QRectF, alpha: float, peak: float):
@@ -552,6 +606,8 @@ class CompactView:
         p.setPen(theme.text(a))
         txt = time.strftime("%H:%M", now)
         p.drawText(QtCore.QRectF(r.x() + 18, r.y(), 80, r.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+        if self._stats:                    # 读数起点固定在「时间 + STAT_LEAD」（不居中、不随读数伸缩）
+            self._paint_stats(p, r.x() + 18 + self._clock_w + STAT_LEAD, cy, a)
         x = r.right() - 16
         x = self._badges(p, x, cy, a) - 4
         if self.weather:
@@ -567,6 +623,63 @@ class CompactView:
                 f.setFamilies([fam, "Segoe Fluent Icons", "Segoe UI Symbol"])
             p.setFont(f)
             p.drawText(QtCore.QRectF(x - tw - 22, r.y(), 20, r.height()), Qt.AlignmentFlag.AlignCenter, glyph)
+
+    # --- 资源读数绘制 ---
+    @staticmethod
+    def _level(pct: float, a: float) -> tuple[QtGui.QColor, QtGui.QColor]:
+        """返回 (环的颜色, 数字的颜色)：>92% 红、>80% 橙，其余用主题强调色 / 次要文字色。"""
+        if pct >= STAT_CRIT:
+            ring = theme.up()
+        elif pct >= STAT_WARN:
+            ring = QtGui.QColor(_WARN_COLOR)
+        else:
+            ring = theme.accent
+        ring = QtGui.QColor(ring)
+        ring.setAlphaF(min(1.0, max(0.0, ring.alphaF() or 1.0) * a))
+        text = QtGui.QColor(ring) if pct >= STAT_WARN else theme.text2(a)
+        return ring, text
+
+    @staticmethod
+    def _ring(p, cx: float, cy: float, pct: float, color: QtGui.QColor):
+        rr = QtCore.QRectF(cx - 6.5, cy - 6.5, 13.0, 13.0)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QtGui.QPen(color.lighter(190), 1.6))
+        p.drawEllipse(rr)
+        span = int(360 * 16 * max(0.0, min(100.0, pct)) / 100.0)
+        if span > 0:
+            pen = QtGui.QPen(color, 1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawArc(rr, 90 * 16, -span)
+
+    def _paint_stats(self, p, left: float, cy: float, a: float):
+        """从 left 起按固定槽位依次画 CPU / 内存（环 + 百分比）与上下行速率。
+
+        起点固定（时间右边固定间距），每个槽位宽度固定（按最宽读数预留），
+        所以读数从 3% 变到 100% 时，任何元素都不会位移——只会右侧留白多少不同。
+        """
+        p.setFont(ui_font(11, W.Medium, num=True))
+        align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        x = left
+        for kind, w in self._stat_slots:
+            if kind in ("cpu", "mem"):
+                try:
+                    pct = float(self.stat.get(kind) or 0.0)
+                except (TypeError, ValueError):
+                    pct = 0.0
+                ring, text = self._level(pct, a)
+                self._ring(p, x + 6.5, cy, pct, ring)
+                p.setPen(text)
+                p.drawText(QtCore.QRectF(x + STAT_RING + STAT_MGAP, cy - 8, w, 16),
+                           align, f"{round(pct)}%")
+            else:
+                val = fmt_rate(self.stat.get(kind))
+                p.setPen(theme.text2(a))
+                arrow = "\u2191" if kind == "up" else "\u2193"
+                p.drawText(QtCore.QRectF(x, cy - 8, self._arr_w + 2, 16), align, arrow)
+                p.drawText(QtCore.QRectF(x + self._arr_w + STAT_MGAP, cy - 8, w, 16), align, val)
+            x += w + STAT_SLOT
+        return x - STAT_SLOT
 
     def _paint_media(self, p, r, a):
         cy = r.center().y()

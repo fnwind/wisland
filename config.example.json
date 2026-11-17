@@ -168,6 +168,14 @@
   "clipboard": {
     "max": 10
   },
+  "compact": {
+    "stats": {
+      "cpu": true,
+      "mem": true,
+      "net": true
+    },
+    "interval": 1.0
+  },
   "launcher": [
     {
       "name": "文件资源管理器",
